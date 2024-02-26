@@ -3,6 +3,7 @@
 
 """Train a video classification model."""
 
+from typing import Any, List
 import math
 import numpy as np
 import pprint
@@ -27,7 +28,62 @@ from slowfast.models.contrastive import (
 from slowfast.utils.meters import AVAMeter, EpochTimer, TrainMeter, ValMeter
 from slowfast.utils.multigrid import MultigridSchedule
 
+import wandb
+
 logger = logging.get_logger(__name__)
+
+
+def init_wandb(*, entity: str, **config: Any) -> None:
+    """
+    Initializes WandB at the beginning of a pipeline.
+
+    Args:
+        entity: The entity name to use. The name of the pipeline is generally
+            a good choice.
+        **config: These arguments will be interpreted as the configuration
+            for WandB. Logging Kedro parameters here is often a good idea.
+
+    """
+    wandb.init(project="self_supervised_video", entity=entity, config=config)
+    # Define "global_step" as the x-axis in all WanbB graphs.
+    wandb.define_metric("*", step_metric="global_step")
+
+
+def _log_first_batch(
+    *, global_step: int, video_inputs: List[List[torch.Tensor]]
+) -> None:
+    """
+    Logs data from the first batch of an epoch.
+
+    Args:
+        global_step: The current global step.
+        video_inputs: The input video batch to the model. Each item in the
+            outer list is the batch for one augmentation, and should have shape
+            `[batch, frames, channels, height, width]`. The first two
+            augmentations will be logged.
+
+    """
+
+    def _to_wandb_image(image: torch.Tensor) -> wandb.Image:
+        int_image = image - image.min()
+        int_image = int_image / int_image.max()
+        int_image = (int_image * 255.0).to(torch.uint8)
+        # WandB doesn't seem to like initializing images from pure
+        # tensors, so we have to do some fancy stuff.
+        return wandb.Image(int_image.permute((1, 2, 0)).cpu().numpy())
+
+    # Take at most 25 images from each batch.
+    wandb.log(
+        {
+            "global_step": global_step,
+            "train/image_examples_aug1": [
+                _to_wandb_image(v[:, 0]) for v in video_inputs[0][0][:3]
+            ],
+            "train/image_examples_aug2": [
+                _to_wandb_image(v[:, 0]) for v in video_inputs[1][0][:3]
+            ],
+        }
+    )
 
 
 def train_epoch(
@@ -59,6 +115,9 @@ def train_epoch(
     train_meter.iter_tic()
     data_size = len(train_loader)
 
+    # Log gradients
+    wandb.watch(model, log_freq=1000)
+
     if cfg.MIXUP.ENABLE:
         mixup_fn = MixUp(
             mixup_alpha=cfg.MIXUP.ALPHA,
@@ -74,9 +133,12 @@ def train_epoch(
     # Explicitly declare reduction to mean.
     loss_fun = losses.get_loss_func(cfg.MODEL.LOSS_FUNC)(reduction="mean")
 
-    for cur_iter, (inputs, labels, index, time, meta) in enumerate(
-        train_loader
-    ):
+    for cur_iter, (inputs, labels, index, time, meta) in enumerate(train_loader):
+        global_step = data_size * cur_epoch + cur_iter
+        if cur_iter == 0:
+            # Log example images on first batch.
+            _log_first_batch(global_step=global_step, video_inputs=inputs)
+
         # Transfer the data to the current GPU device.
         if cfg.NUM_GPUS:
             if isinstance(inputs, (list,)):
@@ -100,9 +162,7 @@ def train_epoch(
                     meta[key] = val.cuda(non_blocking=True)
 
         batch_size = (
-            inputs[0][0].size(0)
-            if isinstance(inputs[0], list)
-            else inputs[0].size(0)
+            inputs[0][0].size(0) if isinstance(inputs[0], list) else inputs[0].size(0)
         )
         # Update the learning rate.
         epoch_exact = cur_epoch + float(cur_iter) / data_size
@@ -267,7 +327,15 @@ def train_epoch(
                         "Train/Top1_err": top1_err,
                         "Train/Top5_err": top5_err,
                     },
-                    global_step=data_size * cur_epoch + cur_iter,
+                    global_step=global_step,
+                )
+            if cur_iter % 10 == 0:
+                wandb.log(
+                    {
+                        "global_step": global_step,
+                        "train/loss": loss,
+                        "train/lr": lr,
+                    }
                 )
         train_meter.iter_toc()  # do measure allreduce for this meter
         train_meter.log_iter_stats(cur_epoch, cur_iter)
@@ -284,9 +352,7 @@ def train_epoch(
 
 
 @torch.no_grad()
-def eval_epoch(
-    val_loader, model, val_meter, cur_epoch, cfg, train_loader, writer
-):
+def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, train_loader, writer):
     """
     Evaluate the model on the val set.
     Args:
@@ -322,9 +388,7 @@ def eval_epoch(
             index = index.cuda()
             time = time.cuda()
         batch_size = (
-            inputs[0][0].size(0)
-            if isinstance(inputs[0], list)
-            else inputs[0].size(0)
+            inputs[0][0].size(0) if isinstance(inputs[0], list) else inputs[0].size(0)
         )
         val_meter.data_toc()
 
@@ -359,9 +423,7 @@ def eval_epoch(
                 )
                 yd, yi = model(inputs, index, time)
                 K = yi.shape[1]
-                C = (
-                    cfg.CONTRASTIVE.NUM_CLASSES_DOWNSTREAM
-                )  # eg 400 for Kinetics400
+                C = cfg.CONTRASTIVE.NUM_CLASSES_DOWNSTREAM  # eg 400 for Kinetics400
                 candidates = train_labels.view(1, -1).expand(batch_size, -1)
                 retrieval = torch.gather(candidates, 1, yi)
                 retrieval_one_hot = torch.zeros((batch_size * K, C)).cuda()
@@ -421,20 +483,14 @@ def eval_epoch(
     # write to tensorboard format if available.
     if writer is not None:
         if cfg.DETECTION.ENABLE:
-            writer.add_scalars(
-                {"Val/mAP": val_meter.full_map}, global_step=cur_epoch
-            )
+            writer.add_scalars({"Val/mAP": val_meter.full_map}, global_step=cur_epoch)
         else:
             all_preds = [pred.clone().detach() for pred in val_meter.all_preds]
-            all_labels = [
-                label.clone().detach() for label in val_meter.all_labels
-            ]
+            all_labels = [label.clone().detach() for label in val_meter.all_labels]
             if cfg.NUM_GPUS:
                 all_preds = [pred.cpu() for pred in all_preds]
                 all_labels = [label.cpu() for label in all_labels]
-            writer.plot_eval(
-                preds=all_preds, labels=all_labels, global_step=cur_epoch
-            )
+            writer.plot_eval(preds=all_preds, labels=all_labels, global_step=cur_epoch)
 
     val_meter.reset()
 
@@ -491,9 +547,7 @@ def build_trainer(cfg):
     # Create the video train and val loaders.
     train_loader = loader.construct_loader(cfg, "train")
     val_loader = loader.construct_loader(cfg, "val")
-    precise_bn_loader = loader.construct_loader(
-        cfg, "train", is_precise_bn=True
-    )
+    precise_bn_loader = loader.construct_loader(cfg, "train", is_precise_bn=True)
     # Create meters.
     train_meter = TrainMeter(len(train_loader), cfg)
     val_meter = ValMeter(len(val_loader), cfg)
@@ -516,6 +570,8 @@ def train(cfg):
         cfg (CfgNode): configs. Details can be found in
             slowfast/config/defaults.py
     """
+    init_wandb(entity=cfg.WANDB.ENTITY, **cfg)
+
     # Set up environment.
     du.init_distributed_training(cfg)
     # Set random seed from configs.
@@ -620,9 +676,7 @@ def train(cfg):
         val_meter = ValMeter(len(val_loader), cfg)
 
     # set up writer for logging to Tensorboard format.
-    if cfg.TENSORBOARD.ENABLE and du.is_master_proc(
-        cfg.NUM_GPUS * cfg.NUM_SHARDS
-    ):
+    if cfg.TENSORBOARD.ENABLE and du.is_master_proc(cfg.NUM_GPUS * cfg.NUM_SHARDS):
         writer = tb.TensorboardWriter(cfg)
     else:
         writer = None
@@ -668,9 +722,7 @@ def train(cfg):
                 else:
                     last_checkpoint = cfg.TRAIN.CHECKPOINT_FILE_PATH
                 logger.info("Load from {}".format(last_checkpoint))
-                cu.load_checkpoint(
-                    last_checkpoint, model, cfg.NUM_GPUS > 1, optimizer
-                )
+                cu.load_checkpoint(last_checkpoint, model, cfg.NUM_GPUS > 1, optimizer)
 
         # Shuffle the dataset.
         loader.shuffle_dataset(train_loader, cur_epoch)
@@ -744,18 +796,20 @@ def train(cfg):
                 scaler if cfg.TRAIN.MIXED_PRECISION else None,
             )
         # Evaluate the model on validation set.
-        if is_eval_epoch:
-            eval_epoch(
-                val_loader,
-                model,
-                val_meter,
-                cur_epoch,
-                cfg,
-                train_loader,
-                writer,
-            )
-    if start_epoch == cfg.SOLVER.MAX_EPOCH and not cfg.MASK.ENABLE: # final checkpoint load
-        eval_epoch(val_loader, model, val_meter, start_epoch, cfg, train_loader, writer)
+        # if is_eval_epoch:
+        #     eval_epoch(
+        #         val_loader,
+        #         model,
+        #         val_meter,
+        #         cur_epoch,
+        #         cfg,
+        #         train_loader,
+        #         writer,
+        #     )
+    # if (
+    #     start_epoch == cfg.SOLVER.MAX_EPOCH and not cfg.MASK.ENABLE
+    # ):  # final checkpoint load
+    #     eval_epoch(val_loader, model, val_meter, start_epoch, cfg, train_loader, writer)
     if writer is not None:
         writer.close()
     result_string = (
@@ -763,9 +817,11 @@ def train(cfg):
         "".format(
             params / 1e6,
             flops,
-            epoch_timer.median_epoch_time() / 60.0
-            if len(epoch_timer.epoch_times)
-            else 0.0,
+            (
+                epoch_timer.median_epoch_time() / 60.0
+                if len(epoch_timer.epoch_times)
+                else 0.0
+            ),
             misc.gpu_mem_usage(),
             100 - val_meter.min_top1_err,
             100 - val_meter.min_top5_err,
