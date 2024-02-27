@@ -135,7 +135,7 @@ def train_epoch(
 
     for cur_iter, (inputs, labels, index, time, meta) in enumerate(train_loader):
         global_step = data_size * cur_epoch + cur_iter
-        if cur_iter == 0:
+        if cur_epoch % 10 == 0 and cur_iter == 0:
             # Log example images on first batch.
             _log_first_batch(global_step=global_step, video_inputs=inputs)
 
@@ -794,6 +794,8 @@ def train(cfg):
                 cur_epoch,
                 cfg,
                 scaler if cfg.TRAIN.MIXED_PRECISION else None,
+                # Upload the last one.
+                upload_to_wandb=(cur_epoch == cfg.SOLVER.MAX_EPOCH - 1),
             )
         # Evaluate the model on validation set.
         # if is_eval_epoch:
