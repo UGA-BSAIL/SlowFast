@@ -1,17 +1,21 @@
 from pathlib import Path
 import random
-from typing import Tuple, List, Any
+from typing import Tuple, List, Any, Iterable
+from dataclasses import dataclass
 
 import torch
 import torchvision.transforms
 from torch import Tensor
 from torch.utils.data import Dataset
-from torchvision.io import read_image
+from torchvision.io import read_image, read_video
 from torchvision.transforms import functional as F
 
 import pandas as pd
 
 from yacs.config import CfgNode
+
+from yaml import CLoader
+import yaml
 
 import slowfast.utils.logging as logging
 from .build import DATASET_REGISTRY
@@ -20,6 +24,46 @@ from .schemas import MarsMetadata
 from .random_erasing import RandomErasing
 
 logger = logging.get_logger(__name__)
+
+
+def _spatial_sampling(clip: Tensor, *, config: CfgNode) -> Tensor:
+    """
+    Performs spatial sampling on a clip.
+
+    Args:
+        clip: The clip to sample.
+        config: The configuration to use.
+
+    Returns:
+        The augmented clip.
+
+    """
+    scl, asp = (
+        config.DATA.TRAIN_JITTER_SCALES_RELATIVE,
+        config.DATA.TRAIN_JITTER_ASPECT_RELATIVE,
+    )
+    relative_scales = None if len(scl) == 0 else scl
+    relative_aspect = None if len(asp) == 0 else asp
+    min_scale = config.DATA.TRAIN_JITTER_SCALES[0]
+    max_scale = config.DATA.TRAIN_JITTER_SCALES[1]
+    crop_size = config.DATA.TRAIN_CROP_SIZE
+    if config.MULTIGRID.DEFAULT_S > 0:
+        # Decreasing the scale is equivalent to using a larger "span"
+        # in a sampling grid.
+        min_scale = int(
+            round(float(min_scale) * crop_size / config.MULTIGRID.DEFAULT_S)
+        )
+    return utils.spatial_sampling(
+        clip,
+        min_scale=min_scale,
+        max_scale=max_scale,
+        crop_size=crop_size,
+        random_horizontal_flip=config.DATA.RANDOM_FLIP,
+        inverse_uniform_sampling=config.DATA.INV_UNIFORM_SAMPLE,
+        aspect_ratio=relative_aspect,
+        scale=relative_scales,
+        motion_shift=config.DATA.TRAIN_JITTER_MOTION_SHIFT,
+    )
 
 
 class CottonClips(Dataset):
@@ -182,32 +226,7 @@ class Cotton(CottonClips):
         )
         augmented_clip = augmented_clip.permute(1, 0, 2, 3)
 
-        scl, asp = (
-            self._config.DATA.TRAIN_JITTER_SCALES_RELATIVE,
-            self._config.DATA.TRAIN_JITTER_ASPECT_RELATIVE,
-        )
-        relative_scales = None if len(scl) == 0 else scl
-        relative_aspect = None if len(asp) == 0 else asp
-        min_scale = self._config.DATA.TRAIN_JITTER_SCALES[0]
-        max_scale = self._config.DATA.TRAIN_JITTER_SCALES[1]
-        crop_size = self._config.DATA.TRAIN_CROP_SIZE
-        if self._config.MULTIGRID.DEFAULT_S > 0:
-            # Decreasing the scale is equivalent to using a larger "span"
-            # in a sampling grid.
-            min_scale = int(
-                round(float(min_scale) * crop_size / self._config.MULTIGRID.DEFAULT_S)
-            )
-        augmented_clip = utils.spatial_sampling(
-            augmented_clip,
-            min_scale=min_scale,
-            max_scale=max_scale,
-            crop_size=crop_size,
-            random_horizontal_flip=self._config.DATA.RANDOM_FLIP,
-            inverse_uniform_sampling=self._config.DATA.INV_UNIFORM_SAMPLE,
-            aspect_ratio=relative_aspect,
-            scale=relative_scales,
-            motion_shift=self._config.DATA.TRAIN_JITTER_MOTION_SHIFT,
-        )
+        augmented_clip = _spatial_sampling(augmented_clip, config=self._config)
 
         if self._config.AUG.ENABLE and self._config.AUG.RE_PROB > 0:
             erase_transform = RandomErasing(
@@ -264,3 +283,113 @@ class Cotton(CottonClips):
             # For validation, we don't provide the input frames as a list.
             sampled_clips = sampled_clips[0]
         return sampled_clips, labels, item, torch.zeros((1, 1)), {}
+
+
+@DATASET_REGISTRY.register()
+class CottonLabeled:
+    """
+    A dataset of labeled clips drawn from the larger MARS dataset.
+    """
+
+    @dataclass
+    class Label:
+        """
+        Represents a labeled clip.
+
+        Attributes:
+            num_flowers: The number of flowers in the clip.
+            row_status: The row status label for the clip.
+
+        """
+
+        num_flowers: int
+        row_status: int
+
+    def __init__(self, config: CfgNode, mode: str):
+        """
+        Args:
+            config: The configuration to use.
+            mode: The mode, either "train", "test", or "val".
+
+        """
+        assert mode in {"train", "test", "val"}, f"Invalid mode '{mode}'."
+        self.__mode = mode
+
+        self.__config = config
+        video_dir = Path(config.DATA.PATH_TO_DATA_DIR) / mode
+        self.__videos = sorted(list(video_dir.glob("*.mp4")))
+        self.__labels = self.__load_labels(self.__videos)
+
+    def __load_labels(self, video_paths: Iterable[Path]) -> List[Label]:
+        """
+        Loads all the labels into memory.
+
+        Args:
+            video_paths: The paths to the videos.
+
+        Returns:
+            A list of the labels corresponding to the video paths.
+
+        """
+        labels = []
+        for video_path in video_paths:
+            # Read the label file.
+            label_path = video_path.parent / f"{video_path.stem}.yml"
+            label_data = yaml.load(label_path.open(), Loader=CLoader)
+
+            labels.append(
+                self.Label(
+                    num_flowers=int(label_data["num_flowers"]),
+                    row_status=int(label_data["row_status"]),
+                )
+            )
+
+        return labels
+
+    def __len__(self) -> int:
+        return len(self.__videos)
+
+    @property
+    def num_videos(self) -> int:
+        return len(self)
+
+    def __getitem__(self, item: int) -> Tuple[List[Tensor], Tensor, int, Tensor, dict]:
+        """
+        Gets the specified video.
+
+        Args:
+            item: The index of the video to read.
+
+        Returns:
+            - The video frames, in the form `[channels, num_frames, height,
+                width]`
+            - The row status label
+            - The input index.
+            - The time index, currently unused.
+            - Additional metadata, currently unused.
+
+        """
+        # Load the video.
+        video_path = self.__videos[item]
+        video, _, _ = read_video(
+            video_path.as_posix(), pts_unit="sec", output_format="TCHW"
+        )
+
+        # Perform color normalization.
+        video = F.normalize(
+            video.float(), self.__config.DATA.MEAN, self.__config.DATA.STD
+        )
+        # Convert from TCHW to CTHW.
+        video = video.permute(1, 0, 2, 3)
+
+        video = _spatial_sampling(video, config=self.__config)
+
+        # Load the labels.
+        labels = self.__labels[item]
+        return (
+            [video],
+            torch.as_tensor(labels.row_status),
+            item,
+            torch.zeros((1, 1)),
+            {},
+        )

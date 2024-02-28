@@ -50,7 +50,7 @@ def init_wandb(*, entity: str, **config: Any) -> None:
 
 
 def _log_first_batch(
-    *, global_step: int, video_inputs: List[List[torch.Tensor]]
+    *, global_step: int, video_inputs: List[List[torch.Tensor]] | List[torch.Tensor]
 ) -> None:
     """
     Logs data from the first batch of an epoch.
@@ -60,7 +60,8 @@ def _log_first_batch(
         video_inputs: The input video batch to the model. Each item in the
             outer list is the batch for one augmentation, and should have shape
             `[batch, frames, channels, height, width]`. The first two
-            augmentations will be logged.
+            augmentations will be logged. Additionally, it also accepts
+            non-augmented input in the form of a Tensor with the above shape.
 
     """
 
@@ -72,18 +73,23 @@ def _log_first_batch(
         # tensors, so we have to do some fancy stuff.
         return wandb.Image(int_image.permute((1, 2, 0)).cpu().numpy())
 
+    logs = {}
+    if isinstance(video_inputs[0], list):
+        # We have augmented data, as with SimCLR.
+        logs["train/image_examples_aug1"] = [
+            _to_wandb_image(v[:, 0]) for v in video_inputs[0][0][:3]
+        ]
+        logs["train/image_examples_aug2"] = [
+            _to_wandb_image(v[:, 0]) for v in video_inputs[1][0][:3]
+        ]
+    else:
+        # This is just normal input data.
+        logs["train/image_examples"] = [
+            _to_wandb_image(v[:, 0]) for v in video_inputs[0][:3]
+        ]
+
     # Take at most 25 images from each batch.
-    wandb.log(
-        {
-            "global_step": global_step,
-            "train/image_examples_aug1": [
-                _to_wandb_image(v[:, 0]) for v in video_inputs[0][0][:3]
-            ],
-            "train/image_examples_aug2": [
-                _to_wandb_image(v[:, 0]) for v in video_inputs[1][0][:3]
-            ],
-        }
-    )
+    wandb.log({"global_step": global_step, **logs})
 
 
 def train_epoch(
@@ -287,7 +293,9 @@ def train_epoch(
                     loss_extra = [one_loss.item() for one_loss in loss_extra]
             else:
                 # Compute the errors.
-                num_topks_correct = metrics.topks_correct(preds, labels, (1, 5))
+                num_topks_correct = metrics.topks_correct(
+                    preds, labels, (1, min(5, cfg.MODEL.NUM_CLASSES - 1))
+                )
                 top1_err, top5_err = [
                     (1.0 - x / preds.size(0)) * 100.0 for x in num_topks_correct
                 ]
@@ -335,6 +343,8 @@ def train_epoch(
                         "global_step": global_step,
                         "train/loss": loss,
                         "train/lr": lr,
+                        "train/top1_err": top1_err,
+                        "train/top5_err": top5_err,
                     }
                 )
         train_meter.iter_toc()  # do measure allreduce for this meter
@@ -444,7 +454,9 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, train_loader, write
                 if cfg.DATA.IN22k_VAL_IN1K != "":
                     preds = preds[:, :1000]
                 # Compute the errors.
-                num_topks_correct = metrics.topks_correct(preds, labels, (1, 5))
+                num_topks_correct = metrics.topks_correct(
+                    preds, labels, (1, min(cfg.MODEL.NUM_CLASSES - 1, 5))
+                )
 
                 # Combine the errors across the GPUs.
                 top1_err, top5_err = [
@@ -467,11 +479,19 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, train_loader, write
                     ),  # If running  on CPU (cfg.NUM_GPUS == 1), use 1 to represent 1 CPU.
                 )
                 # write to tensorboard format if available.
+                global_step = len(val_loader) * cur_epoch + cur_iter
                 if writer is not None:
                     writer.add_scalars(
                         {"Val/Top1_err": top1_err, "Val/Top5_err": top5_err},
-                        global_step=len(val_loader) * cur_epoch + cur_iter,
+                        global_step=global_step,
                     )
+                wandb.log(
+                    {
+                        "val/top1_err": top1_err,
+                        "val/topk_error": top5_err,
+                        "global_step": global_step,
+                    }
+                )
 
             val_meter.update_predictions(preds, labels)
 
@@ -798,20 +818,20 @@ def train(cfg):
                 upload_to_wandb=(cur_epoch == cfg.SOLVER.MAX_EPOCH - 1),
             )
         # Evaluate the model on validation set.
-        # if is_eval_epoch:
-        #     eval_epoch(
-        #         val_loader,
-        #         model,
-        #         val_meter,
-        #         cur_epoch,
-        #         cfg,
-        #         train_loader,
-        #         writer,
-        #     )
-    # if (
-    #     start_epoch == cfg.SOLVER.MAX_EPOCH and not cfg.MASK.ENABLE
-    # ):  # final checkpoint load
-    #     eval_epoch(val_loader, model, val_meter, start_epoch, cfg, train_loader, writer)
+        if is_eval_epoch:
+            eval_epoch(
+                val_loader,
+                model,
+                val_meter,
+                cur_epoch,
+                cfg,
+                train_loader,
+                writer,
+            )
+    if (
+        start_epoch == cfg.SOLVER.MAX_EPOCH and not cfg.MASK.ENABLE
+    ):  # final checkpoint load
+        eval_epoch(val_loader, model, val_meter, start_epoch, cfg, train_loader, writer)
     if writer is not None:
         writer.close()
     result_string = (

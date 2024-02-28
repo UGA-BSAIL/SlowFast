@@ -27,5 +27,5 @@ def build_dataset(dataset_name, cfg, split):
     # Capitalize the the first letter of the dataset_name since the dataset_name
     # in configs may be in lowercase but the name of dataset class should always
     # start with an uppercase letter.
-    name = dataset_name.capitalize()
+    name = dataset_name.upper()[0] + dataset_name[1:]
     return DATASET_REGISTRY.get(name)(cfg, split)

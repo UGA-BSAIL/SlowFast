@@ -91,7 +91,6 @@ def random_short_side_scale_jitter(
             images,
             size=(new_height, new_width),
             mode="nearest",
-            align_corners=False,
         ),
         boxes,
     )
