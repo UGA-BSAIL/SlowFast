@@ -1,9 +1,7 @@
 TASK: ssl
 TRAIN:
   DATASET: cotton
-  # Effectively disable evaluation.
-  EVAL_PERIOD: 500
-  CHECKPOINT_PERIOD: 10
+  CHECKPOINT_PERIOD: 20
   AUTO_RESUME: True
   BATCH_SIZE: 32
 MODEL:
@@ -27,7 +25,9 @@ CONTRASTIVE:
 AUG:
   RE_PROB: 0.0
 DATA:
-  PATH_TO_METADATA: /blue/lift-phenomics/daniel.petti/ssl/data/05_model_input/mars_dataset_meta.feather/2023-03-06T20.08.25.035Z/mars_dataset_meta.feather
+  COTTON:
+    PATH_TO_METADATA: /blue/lift-phenomics/daniel.petti/ssl/data/05_model_input/mars_dataset_meta.feather/2023-03-06T20.08.25.035Z/mars_dataset_meta.feather
+    TEMPORAL_MULTI_CAMERA: False  # default false
   PATH_TO_DATA_DIR: /blue/lift-phenomics/daniel.petti/ssl/data/05_model_input/mars_multi_camera
   NUM_FRAMES: 8
   SAMPLING_RATE: 8

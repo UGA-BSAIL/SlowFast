@@ -829,7 +829,9 @@ def train(cfg):
                 writer,
             )
     if (
-        start_epoch == cfg.SOLVER.MAX_EPOCH and not cfg.MASK.ENABLE
+        start_epoch == cfg.SOLVER.MAX_EPOCH
+        and not cfg.MASK.ENABLE
+        and cfg.MODEL.MODEL_NAME != "ContrastiveModel"
     ):  # final checkpoint load
         eval_epoch(val_loader, model, val_meter, start_epoch, cfg, train_loader, writer)
     if writer is not None:

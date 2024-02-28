@@ -207,6 +207,9 @@ def is_eval_epoch(cfg, cur_epoch, multigrid_schedule):
         cur_epoch (int): current epoch.
         multigrid_schedule (List): schedule for multigrid training.
     """
+    if cfg.MODEL.MODEL_NAME == "ContrastiveModel":
+        # For pre-training, don't bother to evaluate.
+        return False
     if cur_epoch + 1 == cfg.SOLVER.MAX_EPOCH:
         return True
     if multigrid_schedule is not None:

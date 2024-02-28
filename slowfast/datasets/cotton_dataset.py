@@ -71,27 +71,26 @@ class CottonClips(Dataset):
     Dataset that reads single clips from the cotton dataset.
     """
 
-    def __init__(
-        self,
-        config: CfgNode,
-        _mode: str,
-    ):
+    def __init__(self, config: CfgNode, *, camera: int):
         """
         Args:
             config: The configuration.
-            _mode: Ignored for now, since this dataset is currently used only
-                for self-supervised pre-training.
+            camera: Which camera we should source data from.
 
         """
         # Load the metadata.
-        mars_metadata = pd.read_feather(config.DATA.PATH_TO_METADATA)
+        mars_metadata = pd.read_feather(config.DATA.COTTON.PATH_TO_METADATA)
         self.__metadata = self.__filter_zero_length_clips(mars_metadata).set_index(
             MarsMetadata.CLIP.value
         )
+        # Filter to just this camera.
+        self.__metadata = self.__metadata[
+            self.__metadata[MarsMetadata.CAMERA.value] == camera
+        ]
 
         self.__image_folder = Path(config.DATA.PATH_TO_DATA_DIR)
         logger.info(f"Loading dataset images from {self.__image_folder}.")
-        self._config = config
+        self.__config = config
 
         # Find the clips from the metadata.
         self.__clip_ids = self.__metadata.index.unique()
@@ -142,10 +141,10 @@ class CottonClips(Dataset):
             The list of files to sample.
 
         """
-        num_frames = self._config.DATA.NUM_FRAMES
+        num_frames = self.__config.DATA.NUM_FRAMES
         sampling_rate = utils.get_random_sampling_rate(
-            self._config.MULTIGRID.LONG_CYCLE_SAMPLING_RATE,
-            self._config.DATA.SAMPLING_RATE,
+            self.__config.MULTIGRID.LONG_CYCLE_SAMPLING_RATE,
+            self.__config.DATA.SAMPLING_RATE,
         )
         video_length = len(frame_files)
 
@@ -169,20 +168,14 @@ class CottonClips(Dataset):
 
         Returns:
             frames: the frames of sampled from the video. The dimension
-                is `channel` x `num frames` x `height` x `width`. This will
-                be provided as a list, with one tensor for each pathway.
+                is `channel` x `num frames` x `height` x `width`.
 
         """
         # Figure out which file we should read.
         clip_id = self.__clip_ids[item]
         clip_files = self.__metadata.loc[
-            clip_id, [MarsMetadata.CAMERA.value, MarsMetadata.FILE_ID.value]
+            clip_id, MarsMetadata.FILE_ID.value
         ]
-        # Select a single camera.
-        all_cameras = clip_files[MarsMetadata.CAMERA.value].unique()
-        clip_files = clip_files[
-            clip_files[MarsMetadata.CAMERA.value] == random.choice(all_cameras)
-        ][MarsMetadata.FILE_ID.value]
         clip_paths = [self.__image_folder / f"{p}.jpg" for p in clip_files]
         sample_paths = self.__sample_video_frames(clip_paths)
 
@@ -190,14 +183,25 @@ class CottonClips(Dataset):
 
 
 @DATASET_REGISTRY.register()
-class Cotton(CottonClips):
+class Cotton:
     """
     A dataset that reads paired and augmented clips from the cotton dataset,
     for use with contrastive learning.
     """
 
-    def __init__(self, *args: Any, **kwargs: Any):
-        super().__init__(*args, **kwargs)
+    def __init__(self, config: CfgNode, _mode: str):
+        """
+        Args:
+            config: The configuration to use.
+            _mode: The mode. Will be ignored for this dataset.
+
+        """
+        self.__config = config
+
+        # Create clip datasets for each camera.
+        self.__clip_datasets = []
+        for camera in config.DATA.COTTON.USE_CAMERAS:
+            self.__clip_datasets.append(CottonClips(config, camera=camera))
 
         # Annoyingly, this is required by some downstream code. We don't have
         # any labels so we set them all to zero.
@@ -217,23 +221,23 @@ class Cotton(CottonClips):
 
         """
         augmented_clip = clip
-        if self._config.DATA.SSL_COLOR_JITTER:
+        if self.__config.DATA.SSL_COLOR_JITTER:
             augmented_clip = self.__ssl_aug_transform(augmented_clip)
 
         # Perform color normalization.
         augmented_clip = F.normalize(
-            augmented_clip.float(), self._config.DATA.MEAN, self._config.DATA.STD
+            augmented_clip.float(), self.__config.DATA.MEAN, self.__config.DATA.STD
         )
         augmented_clip = augmented_clip.permute(1, 0, 2, 3)
 
-        augmented_clip = _spatial_sampling(augmented_clip, config=self._config)
+        augmented_clip = _spatial_sampling(augmented_clip, config=self.__config)
 
-        if self._config.AUG.ENABLE and self._config.AUG.RE_PROB > 0:
+        if self.__config.AUG.ENABLE and self.__config.AUG.RE_PROB > 0:
             erase_transform = RandomErasing(
-                self._config.AUG.RE_PROB,
-                mode=self._config.AUG.RE_MODE,
-                max_count=self._config.AUG.RE_COUNT,
-                num_splits=self._config.AUG.RE_COUNT,
+                self.__config.AUG.RE_PROB,
+                mode=self.__config.AUG.RE_MODE,
+                max_count=self.__config.AUG.RE_COUNT,
+                num_splits=self.__config.AUG.RE_COUNT,
             )
             augmented_clip = erase_transform(
                 augmented_clip.permute(1, 0, 2, 3)
@@ -260,29 +264,40 @@ class Cotton(CottonClips):
             extra_data: Unused, set to empty dict.
         """
         # Sample the correct number of clips from the input video.
-        num_temporal_samples = self._config.DATA.TRAIN_CROP_NUM_TEMPORAL
+        num_temporal_samples = self.__config.DATA.TRAIN_CROP_NUM_TEMPORAL
         # Also augment each clip multiple times.
         num_augmentations = (
-            self._config.DATA.TRAIN_CROP_NUM_SPATIAL * self._config.AUG.NUM_SAMPLE
+                self.__config.DATA.TRAIN_CROP_NUM_SPATIAL * self.__config.AUG.NUM_SAMPLE
         )
         sampled_clips = []
 
+        camera_dataset = random.choice(self.__clip_datasets)
         for temporal_i in range(num_temporal_samples):
             # Sample temporally.
-            clip = super().__getitem__(item)
+            if self.__config.DATA.COTTON.TEMPORAL_MULTI_CAMERA:
+                # Allow each clip to be from a different camera.
+                camera_dataset = random.choice(self.__clip_datasets)
+            clip = camera_dataset[item]
 
             for spatial_i in range(num_augmentations):
                 # Do augmentation.
                 augmented_clip = self.__spatially_augment_clip(clip)
-                augmented_clip = utils.pack_pathway_output(self._config, augmented_clip)
+                augmented_clip = utils.pack_pathway_output(self.__config, augmented_clip)
 
                 sampled_clips.append(augmented_clip)
 
         labels = torch.zeros(len(sampled_clips))
+
+        # Make the order indefinite here to spice up contrastive training.
+        random.shuffle(sampled_clips)
+
         if len(sampled_clips) == 1:
             # For validation, we don't provide the input frames as a list.
             sampled_clips = sampled_clips[0]
         return sampled_clips, labels, item, torch.zeros((1, 1)), {}
+
+    def __len__(self) -> int:
+        return len(self.__clip_datasets[0])
 
 
 @DATASET_REGISTRY.register()
