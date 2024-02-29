@@ -4,8 +4,10 @@
 """Loss functions."""
 
 from functools import partial
+from typing import List
 import torch
 import torch.nn as nn
+from torch import Tensor
 
 from pytorchvideo.losses.soft_target_cross_entropy import (
     SoftTargetCrossEntropyLoss,
@@ -19,9 +21,7 @@ class ContrastiveLoss(nn.Module):
 
     def forward(self, inputs, dummy_labels=None):
         targets = torch.zeros(inputs.shape[0], dtype=torch.long).cuda()
-        loss = nn.CrossEntropyLoss(reduction=self.reduction).cuda()(
-            inputs, targets
-        )
+        loss = nn.CrossEntropyLoss(reduction=self.reduction).cuda()(inputs, targets)
         return loss
 
 
@@ -62,13 +62,43 @@ class MultipleMSELoss(nn.Module):
         return loss_sum, multi_loss
 
 
+class MultiTaskLoss(nn.Module):
+    """
+    Container that wraps several different losses for multi-task networks.
+    """
+
+    def __init__(self, task_losses: List[nn.Module], weights: List[float] | None):
+        """
+        Args:
+            task_losses: list of losses to use for each task.
+            weights: list of weights for each task loss. If
+                None, all tasks will have equal weight.
+        """
+        super(MultiTaskLoss, self).__init__()
+        self.task_losses = task_losses
+
+        self.weights = weights
+        if self.weights is None:
+            # Make them all equal.
+            self.weights = [1.0] * len(self.task_losses)
+
+    def forward(self, x: List[Tensor], y: List[Tensor]) -> Tensor:
+        """
+        Args:
+            x: output of the network.
+            y: ground truth.
+        """
+        loss = torch.zeros(1, dtype=torch.float32, device=x[0].device)
+        for task_loss, weight, xt, yt in zip(self.task_losses, self.weights, x, y):
+            loss += weight * task_loss(xt, yt)
+        return loss
+
+
 _LOSSES = {
     "cross_entropy": nn.CrossEntropyLoss,
     "bce": nn.BCELoss,
     "bce_logit": nn.BCEWithLogitsLoss,
-    "soft_cross_entropy": partial(
-        SoftTargetCrossEntropyLoss, normalize_targets=False
-    ),
+    "soft_cross_entropy": partial(SoftTargetCrossEntropyLoss, normalize_targets=False),
     "contrastive_loss": ContrastiveLoss,
     "mse": nn.MSELoss,
     "multi_mse": MultipleMSELoss,

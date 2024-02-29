@@ -173,9 +173,7 @@ class CottonClips(Dataset):
         """
         # Figure out which file we should read.
         clip_id = self.__clip_ids[item]
-        clip_files = self.__metadata.loc[
-            clip_id, MarsMetadata.FILE_ID.value
-        ]
+        clip_files = self.__metadata.loc[clip_id, MarsMetadata.FILE_ID.value]
         clip_paths = [self.__image_folder / f"{p}.jpg" for p in clip_files]
         sample_paths = self.__sample_video_frames(clip_paths)
 
@@ -267,7 +265,7 @@ class Cotton:
         num_temporal_samples = self.__config.DATA.TRAIN_CROP_NUM_TEMPORAL
         # Also augment each clip multiple times.
         num_augmentations = (
-                self.__config.DATA.TRAIN_CROP_NUM_SPATIAL * self.__config.AUG.NUM_SAMPLE
+            self.__config.DATA.TRAIN_CROP_NUM_SPATIAL * self.__config.AUG.NUM_SAMPLE
         )
         sampled_clips = []
 
@@ -282,7 +280,9 @@ class Cotton:
             for spatial_i in range(num_augmentations):
                 # Do augmentation.
                 augmented_clip = self.__spatially_augment_clip(clip)
-                augmented_clip = utils.pack_pathway_output(self.__config, augmented_clip)
+                augmented_clip = utils.pack_pathway_output(
+                    self.__config, augmented_clip
+                )
 
                 sampled_clips.append(augmented_clip)
 
@@ -401,9 +401,13 @@ class CottonLabeled:
 
         # Load the labels.
         labels = self.__labels[item]
+        class_1 = torch.as_tensor(labels.num_flowers > 0, dtype=torch.long)
+        class_2 = torch.as_tensor(labels.num_flowers > 1, dtype=torch.long)
+        class_3 = torch.as_tensor(labels.num_flowers > 3, dtype=torch.long)
+        class_4 = torch.as_tensor(labels.num_flowers > 5, dtype=torch.long)
         return (
             [video],
-            torch.as_tensor(labels.row_status),
+            class_1 + class_2 + class_3 + class_4,
             item,
             torch.zeros((1, 1)),
             {},
