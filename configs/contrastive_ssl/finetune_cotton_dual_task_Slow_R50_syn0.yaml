@@ -42,11 +42,12 @@ SOLVER:
   WARMUP_START_LR: 0.01
   OPTIMIZING_METHOD: sgd
 MODEL:
-  NUM_CLASSES: [2]
+  NUM_CLASSES: [3, 5]
+  TASK_NAMES: ["plot_status", "num_flowers"]
   ARCH: slow
   MODEL_NAME: ResNet
-  LOSS_FUNC: cross_entropy
-#  DROPOUT_RATE: 0.5
+  LOSS_FUNC: dual_cross_entropy
+  DROPOUT_RATE: 0.5
 TEST:
   ENABLE: True
   DATASET: CottonLabeled

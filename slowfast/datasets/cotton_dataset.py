@@ -368,7 +368,9 @@ class CottonLabeled:
     def num_videos(self) -> int:
         return len(self)
 
-    def __getitem__(self, item: int) -> Tuple[List[Tensor], Tensor, int, Tensor, dict]:
+    def __getitem__(
+        self, item: int
+    ) -> Tuple[List[Tensor], List[Tensor], int, Tensor, dict]:
         """
         Gets the specified video.
 
@@ -378,7 +380,7 @@ class CottonLabeled:
         Returns:
             - The video frames, in the form `[channels, num_frames, height,
                 width]`
-            - The row status label
+            - The row status and flower count labels.
             - The input index.
             - The time index, currently unused.
             - Additional metadata, currently unused.
@@ -405,9 +407,10 @@ class CottonLabeled:
         class_2 = torch.as_tensor(labels.num_flowers > 1, dtype=torch.long)
         class_3 = torch.as_tensor(labels.num_flowers > 3, dtype=torch.long)
         class_4 = torch.as_tensor(labels.num_flowers > 5, dtype=torch.long)
+        row_status = torch.as_tensor(labels.row_status, dtype=torch.long)
         return (
             [video],
-            class_1 + class_2 + class_3 + class_4,
+            [row_status, class_1 + class_2 + class_3 + class_4],
             item,
             torch.zeros((1, 1)),
             {},

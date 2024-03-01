@@ -7,6 +7,7 @@ import numpy as np
 import os
 import pickle
 import torch
+from itertools import product
 
 import wandb
 
@@ -24,7 +25,7 @@ logger = logging.get_logger(__name__)
 
 
 @torch.no_grad()
-def perform_test(test_loader, model, test_meter, cfg, writer=None):
+def perform_test(test_loader, model, test_meter, cfg, task_index, writer=None):
     """
     For classification:
     Perform mutli-view testing that uniformly samples N clips from a video along
@@ -41,6 +42,8 @@ def perform_test(test_loader, model, test_meter, cfg, writer=None):
             results.
         cfg (CfgNode): configs. Details can be found in
             slowfast/config/defaults.py
+        task_index: For multitask models, the index of the task to evaluate.
+            For single-task models, it should be set to 0.
         writer (TensorboardWriter object, optional): TensorboardWriter object
             to writer Tensorboard log.
     """
@@ -58,7 +61,9 @@ def perform_test(test_loader, model, test_meter, cfg, writer=None):
             else:
                 inputs = inputs.cuda(non_blocking=True)
             # Transfer the data to the current GPU device.
-            labels = labels.cuda()
+            if isinstance(labels, list):
+                labels = labels[task_index]
+            labels = labels.cuda(non_blocking=True)
             video_idx = video_idx.cuda()
             for key, val in meta.items():
                 if isinstance(val, (list,)):
@@ -114,6 +119,11 @@ def perform_test(test_loader, model, test_meter, cfg, writer=None):
         else:
             # Perform the forward pass.
             preds = model(inputs)
+
+        if isinstance(preds, list):
+            # For a multitask model, get the predictions for this task.
+            preds = preds[task_index]
+
         # Gather all the predictions across all the devices to perform ensemble.
         if cfg.NUM_GPUS > 1:
             preds, labels, video_idx = du.all_gather([preds, labels, video_idx])
@@ -174,7 +184,9 @@ def test(cfg):
         cfg.TEST.NUM_TEMPORAL_CLIPS = [cfg.TEST.NUM_ENSEMBLE_VIEWS]
 
     test_meters = []
-    for num_view in cfg.TEST.NUM_TEMPORAL_CLIPS:
+    for num_view, (task_index, num_classes) in product(
+        cfg.TEST.NUM_TEMPORAL_CLIPS, enumerate(cfg.MODEL.NUM_CLASSES)
+    ):
 
         cfg.TEST.NUM_ENSEMBLE_VIEWS = num_view
 
@@ -223,7 +235,7 @@ def test(cfg):
                 // (cfg.TEST.NUM_ENSEMBLE_VIEWS * cfg.TEST.NUM_SPATIAL_CROPS),
                 cfg.TEST.NUM_ENSEMBLE_VIEWS * cfg.TEST.NUM_SPATIAL_CROPS,
                 (
-                    cfg.MODEL.NUM_CLASSES
+                    num_classes
                     if not cfg.TASK == "ssl"
                     else cfg.CONTRASTIVE.NUM_CLASSES_DOWNSTREAM
                 ),
@@ -239,31 +251,41 @@ def test(cfg):
             writer = None
 
         # # Perform multi-view test on the entire dataset.
-        test_meter = perform_test(test_loader, model, test_meter, cfg, writer)
+        test_meter = perform_test(
+            test_loader, model, test_meter, cfg, task_index, writer
+        )
         test_meters.append(test_meter)
         if writer is not None:
             writer.close()
 
     result_string_views = "_p{:.2f}_f{:.2f}".format(params / 1e6, flops)
 
-    for view, test_meter in zip(cfg.TEST.NUM_TEMPORAL_CLIPS, test_meters):
+    for (view, task_name), test_meter in zip(
+        product(cfg.TEST.NUM_TEMPORAL_CLIPS, cfg.MODEL.TASK_NAMES), test_meters
+    ):
         logger.info(
-            "Finalized testing with {} temporal clips and {} spatial crops".format(
-                view, cfg.TEST.NUM_SPATIAL_CROPS
-            )
+            "Finalized testing for task {} with {} temporal clips and {} "
+            "spatial crops"
+            "".format(task_name, view, cfg.TEST.NUM_SPATIAL_CROPS)
         )
-        result_string_views += "_{}a{}" "".format(view, test_meter.stats["top1_acc"])
+        result_string_views += "_{}t{}a{}" "".format(
+            view, task_name, test_meter.stats["top1_acc"]
+        )
 
-        result_string = "_p{:.2f}_f{:.2f}_{}a{} MEM: {:.2f} f: {:.4f}" "".format(
+        result_string = "_p{:.2f}_f{:.2f}_{}t{}a{} MEM: {:.2f} f: {:.4f}" "".format(
             params / 1e6,
             flops,
             view,
+            task_name,
             test_meter.stats["top1_acc"],
             misc.gpu_mem_usage(),
             flops,
         )
         wandb.log(
-            {"global_step": 0, "test/top1_acc": float(test_meter.stats["top1_acc"])}
+            {
+                "global_step": 0,
+                f"test/{task_name}_top1_acc": float(test_meter.stats["top1_acc"]),
+            }
         )
 
         logger.info("{}".format(result_string))

@@ -10,6 +10,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.init import trunc_normal_
 
+from yacs.config import CfgNode
+
 import slowfast.utils.logging as logging
 import slowfast.utils.weight_init_helper as init_helper
 from slowfast.models.attention import MultiScaleBlock
@@ -468,6 +470,10 @@ class ResNet(nn.Module):
                 comments of the config file.
         """
         super(ResNet, self).__init__()
+
+        self.num_heads = len(cfg.MODEL.NUM_CLASSES)
+        self.heads = []
+
         self.norm_module = get_norm(cfg)
         self.enable_detection = cfg.DETECTION.ENABLE
         self.num_pathways = 1
@@ -478,6 +484,53 @@ class ResNet(nn.Module):
             cfg.RESNET.ZERO_INIT_FINAL_BN,
             cfg.RESNET.ZERO_INIT_FINAL_CONV,
         )
+
+    def __construct_head(self, cfg: CfgNode, *, num_classes: int) -> None:
+        """
+        Adds a new head to the model.
+
+        Args:
+            cfg: The configuration to use.
+            num_classes: The number of output classes for this head.
+
+        """
+        width_per_group = cfg.RESNET.WIDTH_PER_GROUP
+        pool_size = _POOL1[cfg.MODEL.ARCH]
+
+        if self.enable_detection:
+            head = head_helper.ResNetRoIHead(
+                dim_in=[width_per_group * 32],
+                num_classes=num_classes,
+                pool_size=[[cfg.DATA.NUM_FRAMES // pool_size[0][0], 1, 1]],
+                resolution=[[cfg.DETECTION.ROI_XFORM_RESOLUTION] * 2],
+                scale_factor=[cfg.DETECTION.SPATIAL_SCALE_FACTOR],
+                dropout_rate=cfg.MODEL.DROPOUT_RATE,
+                act_func=cfg.MODEL.HEAD_ACT,
+                aligned=cfg.DETECTION.ALIGNED,
+                detach_final_fc=cfg.MODEL.DETACH_FINAL_FC,
+            )
+        else:
+            head = head_helper.ResNetBasicHead(
+                dim_in=[width_per_group * 32],
+                num_classes=num_classes,
+                pool_size=[None]
+                if cfg.MULTIGRID.SHORT_CYCLE
+                   or cfg.MODEL.MODEL_NAME == "ContrastiveModel"
+                else [
+                    [
+                        cfg.DATA.NUM_FRAMES // pool_size[0][0],
+                        cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[0][1],
+                        cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[0][2],
+                    ]
+                ],  # None for AdaptiveAvgPool3d((1, 1, 1))
+                dropout_rate=cfg.MODEL.DROPOUT_RATE,
+                act_func=cfg.MODEL.HEAD_ACT,
+                detach_final_fc=cfg.MODEL.DETACH_FINAL_FC,
+                cfg=cfg,
+            )
+
+        self.add_module(f"head{len(self.heads)}", head)
+        self.heads.append(head)
 
     def _construct_network(self, cfg):
         """
@@ -610,37 +663,9 @@ class ResNet(nn.Module):
             norm_module=self.norm_module,
         )
 
-        if self.enable_detection:
-            self.head = head_helper.ResNetRoIHead(
-                dim_in=[width_per_group * 32],
-                num_classes=cfg.MODEL.NUM_CLASSES,
-                pool_size=[[cfg.DATA.NUM_FRAMES // pool_size[0][0], 1, 1]],
-                resolution=[[cfg.DETECTION.ROI_XFORM_RESOLUTION] * 2],
-                scale_factor=[cfg.DETECTION.SPATIAL_SCALE_FACTOR],
-                dropout_rate=cfg.MODEL.DROPOUT_RATE,
-                act_func=cfg.MODEL.HEAD_ACT,
-                aligned=cfg.DETECTION.ALIGNED,
-                detach_final_fc=cfg.MODEL.DETACH_FINAL_FC,
-            )
-        else:
-            self.head = head_helper.ResNetBasicHead(
-                dim_in=[width_per_group * 32],
-                num_classes=cfg.MODEL.NUM_CLASSES,
-                pool_size=[None]
-                if cfg.MULTIGRID.SHORT_CYCLE
-                or cfg.MODEL.MODEL_NAME == "ContrastiveModel"
-                else [
-                    [
-                        cfg.DATA.NUM_FRAMES // pool_size[0][0],
-                        cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[0][1],
-                        cfg.DATA.TRAIN_CROP_SIZE // 32 // pool_size[0][2],
-                    ]
-                ],  # None for AdaptiveAvgPool3d((1, 1, 1))
-                dropout_rate=cfg.MODEL.DROPOUT_RATE,
-                act_func=cfg.MODEL.HEAD_ACT,
-                detach_final_fc=cfg.MODEL.DETACH_FINAL_FC,
-                cfg=cfg,
-            )
+        # Add multiple heads.
+        for num_classes in cfg.MODEL.NUM_CLASSES:
+            self.__construct_head(cfg, num_classes=num_classes)
 
     def forward(self, x, bboxes=None):
         x = x[:]  # avoid pass by reference
@@ -653,11 +678,17 @@ class ResNet(nn.Module):
         x = self.s3(y)
         x = self.s4(x)
         x = self.s5(x)
-        if self.enable_detection:
-            x = self.head(x, bboxes)
-        else:
-            x = self.head(x)
-        return x
+
+        outputs = []
+        for head in self.heads:
+            if self.enable_detection:
+                outputs.append(head(x, bboxes))
+            else:
+                outputs.append(head(x))
+
+        if len(outputs) == 1:
+            return outputs[0]
+        return outputs
 
 
 @MODEL_REGISTRY.register()

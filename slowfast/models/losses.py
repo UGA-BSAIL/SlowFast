@@ -4,7 +4,7 @@
 """Loss functions."""
 
 from functools import partial
-from typing import List
+from typing import List, Callable, Any
 import torch
 import torch.nn as nn
 from torch import Tensor
@@ -67,20 +67,29 @@ class MultiTaskLoss(nn.Module):
     Container that wraps several different losses for multi-task networks.
     """
 
-    def __init__(self, task_losses: List[nn.Module], weights: List[float] | None):
+    def __init__(
+        self,
+        task_losses: List[Callable[[], nn.Module]],
+        weights: List[float] | None = None,
+        **kwargs: Any
+    ):
         """
         Args:
             task_losses: list of losses to use for each task.
             weights: list of weights for each task loss. If
                 None, all tasks will have equal weight.
+            **kwargs: Will be forwarded to sub-losses.
         """
         super(MultiTaskLoss, self).__init__()
-        self.task_losses = task_losses
+        self.task_losses = [t(**kwargs) for t in task_losses]
+        for i, loss in enumerate(self.task_losses):
+            self.add_module(f"loss{i}", loss)
 
         self.weights = weights
         if self.weights is None:
             # Make them all equal.
             self.weights = [1.0] * len(self.task_losses)
+        self.weights = torch.as_tensor(self.weights)
 
     def forward(self, x: List[Tensor], y: List[Tensor]) -> Tensor:
         """
@@ -96,6 +105,9 @@ class MultiTaskLoss(nn.Module):
 
 _LOSSES = {
     "cross_entropy": nn.CrossEntropyLoss,
+    "dual_cross_entropy": partial(
+        MultiTaskLoss, task_losses=[nn.CrossEntropyLoss, nn.CrossEntropyLoss]
+    ),
     "bce": nn.BCELoss,
     "bce_logit": nn.BCEWithLogitsLoss,
     "soft_cross_entropy": partial(SoftTargetCrossEntropyLoss, normalize_targets=False),

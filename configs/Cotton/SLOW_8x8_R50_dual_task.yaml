@@ -1,37 +1,34 @@
-TASK: ssl_eval_cotton
+TASK: cotton_train_scratch
 TRAIN:
+  ENABLE: True
   DATASET: CottonLabeled
   BATCH_SIZE: 32
   EVAL_PERIOD: 10
   CHECKPOINT_PERIOD: 10
   AUTO_RESUME: True
-  CHECKPOINT_CLEAR_NAME_PATTERN: ("backbone.",)
-  CHECKPOINT_TYPE: pytorch
-  CHECKPOINT_EPOCH_RESET: True
 DATA:
   PATH_TO_DATA_DIR: /blue/lift-phenomics/daniel.petti/slowfast/data/labeled_clips
-#  PATH_TO_DATA_DIR: /home/daniel/lab_share/projects/ssl/labeled_clips
   NUM_FRAMES: 8
   SAMPLING_RATE: 8
   TRAIN_JITTER_SCALES: [256, 320]
   TRAIN_CROP_SIZE: 224
   TEST_CROP_SIZE: 256
   INPUT_CHANNEL_NUM: [3]
+#RESNET:
+#  ZERO_INIT_FINAL_BN: True
+#  WIDTH_PER_GROUP: 64
+#  NUM_GROUPS: 1
+#  DEPTH: 50
+#  TRANS_FUNC: bottleneck_transform
+#  STRIDE_1X1: False
+#  NUM_BLOCK_TEMP_KERNEL: [[3], [4], [6], [3]]
+#NONLOCAL:
+#  LOCATION: [[[]], [[]], [[]], [[]]]
+#  GROUP: [[1], [1], [1], [1]]
+#  INSTANTIATION: dot_product
 BN:
-  USE_PRECISE_STATS: False
+  USE_PRECISE_STATS: True
   NUM_BATCHES_PRECISE: 200
-#SOLVER:
-#  BASE_LR: 0.3  # default 0.1
-#  BASE_LR_SCALE_NUM_SHARDS: True
-#  LR_POLICY: steps_with_relative_lrs
-#  STEPS: [0, 16, 24, 28, 32]
-#  LRS: [1, 0.1, 0.01, 0.001]
-#  MAX_EPOCH: 32
-#  MOMENTUM: 0.9
-#  WEIGHT_DECAY: 1e-7
-#  WARMUP_EPOCHS: 5.3
-#  WARMUP_START_LR: 0.0005  # 0.001 / 16 / 32 * 64 = 0.000125
-#  OPTIMIZING_METHOD: sgd
 SOLVER:
   BASE_LR: 0.1
   LR_POLICY: cosine
@@ -42,11 +39,12 @@ SOLVER:
   WARMUP_START_LR: 0.01
   OPTIMIZING_METHOD: sgd
 MODEL:
-  NUM_CLASSES: [2]
+  NUM_CLASSES: [3, 5]
+  TASK_NAMES: ["plot_status", "num_flowers"]
   ARCH: slow
   MODEL_NAME: ResNet
-  LOSS_FUNC: cross_entropy
-#  DROPOUT_RATE: 0.5
+  LOSS_FUNC: dual_cross_entropy
+  DROPOUT_RATE: 0.5
 TEST:
   ENABLE: True
   DATASET: CottonLabeled

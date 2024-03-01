@@ -160,6 +160,8 @@ def train_epoch(
                 labels = labels.cuda(non_blocking=True)
                 index = index.cuda(non_blocking=True)
                 time = time.cuda(non_blocking=True)
+            else:
+                labels = [tl.cuda(non_blocking=True) for tl in labels]
             for key, val in meta.items():
                 if isinstance(val, (list,)):
                     for i in range(len(val)):
@@ -211,7 +213,6 @@ def train_epoch(
                 loss = partial_loss
             else:
                 # Compute the loss.
-                print(preds[0], labels[0])
                 loss = loss_fun(preds, labels)
 
         loss_extra = None
@@ -243,16 +244,22 @@ def train_epoch(
             scaler.step(optimizer)
         scaler.update()
 
+        if isinstance(preds, torch.Tensor):
+            # Handle the single-task case.
+            preds = [preds]
+            labels = [labels]
+
         if cfg.MIXUP.ENABLE:
-            _top_max_k_vals, top_max_k_inds = torch.topk(
-                labels, 2, dim=1, largest=True, sorted=True
-            )
-            idx_top1 = torch.arange(labels.shape[0]), top_max_k_inds[:, 0]
-            idx_top2 = torch.arange(labels.shape[0]), top_max_k_inds[:, 1]
-            preds = preds.detach()
-            preds[idx_top1] += preds[idx_top2]
-            preds[idx_top2] = 0.0
-            labels = top_max_k_inds[:, 0]
+            for i, (task_preds, task_labels) in enumerate(zip(preds, labels)):
+                _top_max_k_vals, top_max_k_inds = torch.topk(
+                    task_labels, 2, dim=1, largest=True, sorted=True
+                )
+                idx_top1 = torch.arange(task_labels.shape[0]), top_max_k_inds[:, 0]
+                idx_top2 = torch.arange(task_labels.shape[0]), top_max_k_inds[:, 1]
+                task_preds = task_preds.detach()
+                task_preds[idx_top1] += task_preds[idx_top2]
+                task_preds[idx_top2] = 0.0
+                labels[i] = top_max_k_inds[:, 0]
 
         if cfg.DETECTION.ENABLE:
             if cfg.NUM_GPUS > 1:
@@ -269,7 +276,7 @@ def train_epoch(
                 )
 
         else:
-            top1_err, top5_err = None, None
+            top1_err, top5_err = [], []
             if cfg.DATA.MULTI_LABEL:
                 # Gather all the predictions across all the devices.
                 if cfg.NUM_GPUS > 1:
@@ -294,30 +301,38 @@ def train_epoch(
                     loss_extra = [one_loss.item() for one_loss in loss_extra]
             else:
                 # Compute the errors.
-                num_topks_correct = metrics.topks_correct(
-                    preds, labels, (1, min(5, cfg.MODEL.NUM_CLASSES - 1))
-                )
-                top1_err, top5_err = [
-                    (1.0 - x / preds.size(0)) * 100.0 for x in num_topks_correct
-                ]
+                num_classes = cfg.MODEL.NUM_CLASSES
+                for task_preds, task_labels, task_num_classes in zip(
+                    preds, labels, num_classes
+                ):
+                    num_topks_correct = metrics.topks_correct(
+                        task_preds, task_labels, (1, min(5, task_num_classes - 1))
+                    )
+                    task_top1_err, task_top5_err = [
+                        (1.0 - x / task_preds.size(0)) * 100.0
+                        for x in num_topks_correct
+                    ]
+                    top1_err.append(task_top1_err)
+                    top5_err.append(task_top5_err)
+
                 # Gather all the predictions across all the devices.
                 if cfg.NUM_GPUS > 1:
-                    loss, grad_norm, top1_err, top5_err = du.all_reduce(
-                        [loss.detach(), grad_norm, top1_err, top5_err]
-                    )
+                    loss, grad_norm = du.all_reduce([loss.detach(), grad_norm])
+                    top1_err = du.all_reduce(top1_err)
+                    top5_err = du.all_reduce(top5_err)
 
                 # Copy the stats from GPU to CPU (sync point).
-                loss, grad_norm, top1_err, top5_err = (
+                loss, grad_norm = (
                     loss.item(),
                     grad_norm.item(),
-                    top1_err.item(),
-                    top5_err.item(),
                 )
+                top1_err = [t.item() for t in top1_err]
+                top5_err = [t.item() for t in top5_err]
 
             # Update and log stats.
             train_meter.update_stats(
-                top1_err,
-                top5_err,
+                np.mean(top1_err),
+                np.mean(top5_err),
                 loss,
                 lr,
                 grad_norm,
@@ -327,15 +342,17 @@ def train_epoch(
                 ),  # If running  on CPU (cfg.NUM_GPUS == 1), use 1 to represent 1 CPU.
                 loss_extra,
             )
+
             # write to tensorboard format if available.
+            top1_errors = {
+                f"train/{t}_top1_err": e for t, e in zip(cfg.MODEL.TASK_NAMES, top1_err)
+            }
+            top5_errors = {
+                f"train/{t}_top5_err": e for t, e in zip(cfg.MODEL.TASK_NAMES, top5_err)
+            }
             if writer is not None:
                 writer.add_scalars(
-                    {
-                        "Train/loss": loss,
-                        "Train/lr": lr,
-                        "Train/Top1_err": top1_err,
-                        "Train/Top5_err": top5_err,
-                    },
+                    {"Train/loss": loss, "Train/lr": lr, **top1_errors, **top5_errors},
                     global_step=global_step,
                 )
             if cur_iter % 10 == 0:
@@ -344,8 +361,8 @@ def train_epoch(
                         "global_step": global_step,
                         "train/loss": loss,
                         "train/lr": lr,
-                        "train/top1_err": top1_err,
-                        "train/top5_err": top5_err,
+                        **top1_errors,
+                        **top5_errors,
                     }
                 )
         train_meter.iter_toc()  # do measure allreduce for this meter
@@ -389,7 +406,10 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, train_loader, write
                     inputs[i] = inputs[i].cuda(non_blocking=True)
             else:
                 inputs = inputs.cuda(non_blocking=True)
-            labels = labels.cuda()
+            if isinstance(labels, list):
+                labels = [tl.cuda(non_blocking=True) for tl in labels]
+            else:
+                labels = labels.cuda(non_blocking=True)
             for key, val in meta.items():
                 if isinstance(val, (list,)):
                     for i in range(len(val)):
@@ -448,49 +468,77 @@ def eval_epoch(val_loader, model, val_meter, cur_epoch, cfg, train_loader, write
             else:
                 preds = model(inputs)
 
+            if isinstance(preds, torch.Tensor):
+                # Handle the single-task case.
+                preds = [preds]
+                labels = [labels]
+
             if cfg.DATA.MULTI_LABEL:
                 if cfg.NUM_GPUS > 1:
-                    preds, labels = du.all_gather([preds, labels])
+                    preds = du.all_gather(preds)
+                    labels = du.all_gather(labels)
             else:
-                if cfg.DATA.IN22k_VAL_IN1K != "":
-                    preds = preds[:, :1000]
-                # Compute the errors.
-                num_topks_correct = metrics.topks_correct(
-                    preds, labels, (1, min(cfg.MODEL.NUM_CLASSES - 1, 5))
-                )
+                top1_err, top5_err = [], []
+                num_classes = cfg.MODEL.NUM_CLASSES
+                for task_preds, task_labels, task_num_classes in zip(
+                    preds, labels, num_classes
+                ):
+                    if cfg.DATA.IN22k_VAL_IN1K != "":
+                        task_preds = task_preds[:, :1000]
+                    # Compute the errors.
+                    num_topks_correct = metrics.topks_correct(
+                        task_preds, task_labels, (1, min(task_num_classes - 1, 5))
+                    )
 
-                # Combine the errors across the GPUs.
-                top1_err, top5_err = [
-                    (1.0 - x / preds.size(0)) * 100.0 for x in num_topks_correct
-                ]
-                if cfg.NUM_GPUS > 1:
-                    top1_err, top5_err = du.all_reduce([top1_err, top5_err])
+                    # Combine the errors across the GPUs.
+                    task_top1_err, task_top5_err = [
+                        (1.0 - x / task_preds.size(0)) * 100.0
+                        for x in num_topks_correct
+                    ]
+                    if cfg.NUM_GPUS > 1:
+                        task_top1_err, task_top5_err = du.all_reduce(
+                            [task_top1_err, task_top5_err]
+                        )
 
-                # Copy the errors from GPU to CPU (sync point).
-                top1_err, top5_err = top1_err.item(), top5_err.item()
+                    # Copy the errors from GPU to CPU (sync point).
+                    task_top1_err, task_top5_err = (
+                        task_top1_err.item(),
+                        task_top5_err.item(),
+                    )
+                    top1_err.append(task_top1_err)
+                    top5_err.append(task_top5_err)
 
                 val_meter.iter_toc()
                 # Update and log stats.
                 val_meter.update_stats(
-                    top1_err,
-                    top5_err,
+                    np.mean(top1_err),
+                    np.mean(top5_err),
                     batch_size
                     * max(
                         cfg.NUM_GPUS, 1
                     ),  # If running  on CPU (cfg.NUM_GPUS == 1), use 1 to represent 1 CPU.
                 )
+
                 # write to tensorboard format if available.
                 global_step = len(val_loader) * cur_epoch + cur_iter
+                top1_errors = {
+                    f"val/{t}_top1_err": e
+                    for t, e in zip(cfg.MODEL.TASK_NAMES, top1_err)
+                }
+                top5_errors = {
+                    f"val/{t}_top5_err": e
+                    for t, e in zip(cfg.MODEL.TASK_NAMES, top5_err)
+                }
                 if writer is not None:
                     writer.add_scalars(
-                        {"Val/Top1_err": top1_err, "Val/Top5_err": top5_err},
+                        {**top1_errors, **top5_errors},
                         global_step=global_step,
                     )
                 wandb.log(
                     {
-                        "val/top1_err": top1_err,
-                        "val/topk_error": top5_err,
                         "global_step": global_step,
+                        **top1_errors,
+                        **top5_errors,
                     }
                 )
 
