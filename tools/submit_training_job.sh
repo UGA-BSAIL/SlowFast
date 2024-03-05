@@ -58,4 +58,4 @@ function prepare_environment() {
 prepare_environment
 
 source .venv/bin/activate
-python -m tools.run_net --cfg configs/contrastive_ssl/SimCLR_SlowR50_8x8_Cotton.yaml
+python -m tools.run_net --cfg configs/contrastive_ssl/SimCLR_SlowR50_8x8_Cotton_spatial_only.yaml

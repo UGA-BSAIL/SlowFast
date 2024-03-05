@@ -53,6 +53,8 @@ TEST:
   BATCH_SIZE: 64
   NUM_ENSEMBLE_VIEWS: 1
   NUM_SPATIAL_CROPS: 1
+  # Test on the best one.
+  CHECKPOINT_FILE_PATH: "checkpoints/best.pyth"
 DATA_LOADER:
   NUM_WORKERS: 10
   PIN_MEMORY: True

@@ -9,6 +9,7 @@ import numpy as np
 import os
 import pickle
 from collections import OrderedDict
+from pathlib import Path
 import torch
 import wandb
 
@@ -119,6 +120,7 @@ def save_checkpoint(
     cfg,
     scaler=None,
     upload_to_wandb: bool = False,
+    is_best: bool = False,
 ):
     """
     Save a checkpoint.
@@ -130,6 +132,8 @@ def save_checkpoint(
         cfg (CfgNode): configs to save.
         scaler (GradScaler): the mixed precision scale.
         upload_to_wandb: If true, it will upload this checkpoint to WandB.
+        is_best: If true, it will create a "best" symlink pointing to
+            this checkppoint.
     """
     # Save checkpoints only from the master process.
     if not du.is_master_proc(cfg.NUM_GPUS * cfg.NUM_SHARDS):
@@ -155,6 +159,15 @@ def save_checkpoint(
         torch.save(checkpoint, f)
     if upload_to_wandb:
         wandb.save(path_to_checkpoint)
+
+    if is_best:
+        logger.info("Updating best saved model.")
+        checkpoint_dir = Path(path_to_checkpoint).parent
+        best_path = checkpoint_dir / "best.pyth"
+        if best_path.is_symlink():
+            best_path.unlink()
+        best_path.symlink_to(Path(path_to_checkpoint).absolute())
+
     return path_to_checkpoint
 
 

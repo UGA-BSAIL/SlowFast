@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 import torchvision.transforms
+from torchvision.transforms import InterpolationMode
 from torch import Tensor
 from torch.utils.data import Dataset
 from torchvision.io import read_image, read_video
@@ -168,7 +169,7 @@ class CottonClips(Dataset):
 
         Returns:
             frames: the frames of sampled from the video. The dimension
-                is `channel` x `num frames` x `height` x `width`.
+                is `num frames` x `channel` x `height` x `width`.
 
         """
         # Figure out which file we should read.
@@ -177,7 +178,16 @@ class CottonClips(Dataset):
         clip_paths = [self.__image_folder / f"{p}.jpg" for p in clip_files]
         sample_paths = self.__sample_video_frames(clip_paths)
 
-        return torch.stack([read_image(p.as_posix()) for p in sample_paths])
+        clip = torch.stack([read_image(p.as_posix()) for p in sample_paths])
+
+        if self.__config.DATA.COTTON.PRE_RESIZE_IMAGE[0] > 0:
+            # Resize images before processing.
+            clip = F.resize(
+                clip,
+                self.__config.DATA.COTTON.PRE_RESIZE_IMAGE,
+                interpolation=InterpolationMode.NEAREST,
+            )
+        return clip
 
 
 @DATASET_REGISTRY.register()
@@ -277,6 +287,10 @@ class Cotton:
                 camera_dataset = random.choice(self.__clip_datasets)
             clip = camera_dataset[item]
 
+            if random.random() < self.__config.DATA.COTTON.RND_REVERSE:
+                # Reverse the clip.
+                clip = torch.flip(clip, [0])
+
             for spatial_i in range(num_augmentations):
                 # Do augmentation.
                 augmented_clip = self.__spatially_augment_clip(clip)
@@ -368,9 +382,7 @@ class CottonLabeled:
     def num_videos(self) -> int:
         return len(self)
 
-    def __getitem__(
-        self, item: int
-    ) -> Tuple[List[Tensor], List[Tensor], int, Tensor, dict]:
+    def __getitem__(self, item: int) -> Tuple[List[Tensor], Tensor, int, Tensor, dict]:
         """
         Gets the specified video.
 
@@ -410,7 +422,7 @@ class CottonLabeled:
         row_status = torch.as_tensor(labels.row_status, dtype=torch.long)
         return (
             [video],
-            [row_status, class_1 + class_2 + class_3 + class_4],
+            class_1 + class_2 + class_3 + class_4,
             item,
             torch.zeros((1, 1)),
             {},

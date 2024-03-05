@@ -121,9 +121,6 @@ def train_epoch(
     train_meter.iter_tic()
     data_size = len(train_loader)
 
-    # Log gradients
-    wandb.watch(model, log_freq=1000)
-
     if cfg.MIXUP.ENABLE:
         mixup_fn = MixUp(
             mixup_alpha=cfg.MIXUP.ALPHA,
@@ -854,6 +851,17 @@ def train(cfg):
             )
         _ = misc.aggregate_sub_bn_stats(model)
 
+        # Evaluate the model on validation set.
+        if is_eval_epoch:
+            eval_epoch(
+                val_loader,
+                model,
+                val_meter,
+                cur_epoch,
+                cfg,
+                train_loader,
+                writer,
+            )
         # Save a checkpoint.
         if is_checkp_epoch:
             cu.save_checkpoint(
@@ -865,17 +873,7 @@ def train(cfg):
                 scaler if cfg.TRAIN.MIXED_PRECISION else None,
                 # Upload the last one.
                 upload_to_wandb=(cur_epoch == cfg.SOLVER.MAX_EPOCH - 1),
-            )
-        # Evaluate the model on validation set.
-        if is_eval_epoch:
-            eval_epoch(
-                val_loader,
-                model,
-                val_meter,
-                cur_epoch,
-                cfg,
-                train_loader,
-                writer,
+                is_best=val_meter.is_best_epoch,
             )
     if (
         start_epoch == cfg.SOLVER.MAX_EPOCH
