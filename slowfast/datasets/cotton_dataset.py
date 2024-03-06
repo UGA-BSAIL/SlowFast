@@ -422,7 +422,7 @@ class CottonLabeled:
         row_status = torch.as_tensor(labels.row_status, dtype=torch.long)
         return (
             [video],
-            class_1 + class_2 + class_3 + class_4,
+            row_status,
             item,
             torch.zeros((1, 1)),
             {},

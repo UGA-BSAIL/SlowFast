@@ -811,7 +811,9 @@ class ValMeter:
         else:
             top1_err = self.num_top1_mis / self.num_samples
             top5_err = self.num_top5_mis / self.num_samples
-            self.is_best_epoch = top1_err < self.min_top1_err
+            self.is_best_epoch = (
+                top1_err <= self.min_top1_err and top5_err <= self.min_top5_err
+            )
             self.min_top1_err = min(self.min_top1_err, top1_err)
             self.min_top5_err = min(self.min_top5_err, top5_err)
 
