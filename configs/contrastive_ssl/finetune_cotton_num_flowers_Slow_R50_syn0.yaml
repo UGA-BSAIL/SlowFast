@@ -11,6 +11,7 @@ TRAIN:
 DATA:
   COTTON:
     PRE_RESIZE_IMAGE: [256, 256]
+    LABEL_TYPE: num_flowers
   PATH_TO_DATA_DIR: /blue/lift-phenomics/daniel.petti/slowfast/data/labeled_clips
 #  PATH_TO_DATA_DIR: /home/daniel/lab_share/projects/ssl/labeled_clips
   NUM_FRAMES: 8

@@ -382,7 +382,9 @@ class CottonLabeled:
     def num_videos(self) -> int:
         return len(self)
 
-    def __getitem__(self, item: int) -> Tuple[List[Tensor], Tensor, int, Tensor, dict]:
+    def __getitem__(
+        self, item: int
+    ) -> Tuple[List[Tensor], Tensor | List[Tensor], int, Tensor, dict]:
         """
         Gets the specified video.
 
@@ -419,10 +421,23 @@ class CottonLabeled:
         class_2 = torch.as_tensor(labels.num_flowers > 1, dtype=torch.long)
         class_3 = torch.as_tensor(labels.num_flowers > 3, dtype=torch.long)
         class_4 = torch.as_tensor(labels.num_flowers > 5, dtype=torch.long)
-        row_status = torch.as_tensor(labels.row_status, dtype=torch.long)
+        num_flowers = class_1 + class_2 + class_3 + class_4
+        plot_status = torch.as_tensor(labels.row_status, dtype=torch.long)
+
+        if self.__config.DATA.COTTON.LABEL_TYPE == "plot_status":
+            labels = plot_status
+        elif self.__config.DATA.COTTON.LABEL_TYPE == "num_flowers":
+            labels = num_flowers
+        elif self.__config.DATA.COTTON.LABEL_TYPE == "dual_task":
+            labels = [plot_status, num_flowers]
+        else:
+            raise ValueError(
+                f"Invalid label type '{self.__config.DATA.COTTON.LABEL_TYPE}'."
+            )
+
         return (
             [video],
-            row_status,
+            labels,
             item,
             torch.zeros((1, 1)),
             {},
